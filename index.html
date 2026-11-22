@@ -314,13 +314,13 @@ async function unzipAndStore(zipBlob) {
 
 /* ================= MOUSE -> KEY REMAP =================
    The game's rebind menu can't bind mouse buttons, so we turn clicks into keys.
-   Left click  -> J,  Right click -> K,  BOTH held together -> L (extra key).
-   In the game's Controls menu, bind J / K / L to whatever actions you want.
+   Left click  -> F7,  Right click -> F8,  BOTH held together -> F9 (rarely used keys).
+   In the game's Controls menu, bind F7 / F8 / F9 by clicking the mouse (or press the real keys).
    Change the codes below if you prefer other keys. */
 const MOUSE_KEYS = {
-  left:  { code: "KeyJ", key: "j", keyCode: 74 },
-  right: { code: "KeyK", key: "k", keyCode: 75 },
-  both:  { code: "KeyL", key: "l", keyCode: 76 },
+  left:  { code: "F7", key: "F7", keyCode: 118 },
+  right: { code: "F8", key: "F8", keyCode: 119 },
+  both:  { code: "F9", key: "F9", keyCode: 120 },
 };
 (function setupMouseRemap() {
   const down = { left: false, right: false, both: false };
@@ -394,7 +394,7 @@ const MOUSE_KEYS = {
       frameworkUrl: buildUrl + "/w-pt.framework.js.unityweb",
       codeUrl: buildUrl + "/w-pt.wasm.unityweb",
       streamingAssetsUrl: "StreamingAssets",
-      companyName: "sshcomet",
+      companyName: "EDUrocks Group, Truffled, GN-Math",
       productName: "Hollow Knight SilkSong",
       productVersion: "1.0",
       showBanner: unityShowBanner,
