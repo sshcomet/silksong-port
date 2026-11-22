@@ -1,0 +1,368 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <base href="https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/">
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <title>Unity Web Player | Hollow Knight SilkSong</title>
+    <link rel="shortcut icon" href="TemplateData/favicon.ico">
+    <link rel="stylesheet" href="TemplateData/style.css">
+  </head>
+  <body>
+    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING...</div>
+    <div id="unity-container">
+      <canvas id="unity-canvas" width=960 height=600 tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"></div>
+        <div id="unity-progress-bar-empty">
+          <div id="unity-progress-bar-full"></div>
+        </div>
+      </div>
+      <div id="unity-warning"> </div>
+    </div>
+    <script src="jszip.js"></script>
+
+<script>
+const loadingText = document.querySelector("#loading-text");
+const CACHE_NAME = "hksilksongcache-v3";           // bumped: forces a clean re-extract
+const KEY_PREFIX = "https://hk-cache.local/";       // stable keys, independent of <base>
+const TOTAL_MB = 1986.64;
+const PART_COUNT = 100;
+const CONCURRENCY = 4;
+
+const originalFetch = window.fetch.bind(window);
+const OrigOpen = XMLHttpRequest.prototype.open;
+const OrigSend = XMLHttpRequest.prototype.send;
+
+let cacheReady = false;
+
+/* ================= HELPERS ================= */
+function baseName(url) {
+  let p = String(url).split("#")[0].split("?")[0].split("/").pop();
+  try { p = decodeURIComponent(p); } catch (e) {}
+  return p;
+}
+function keyFor(name) { return KEY_PREFIX + encodeURIComponent(name); }
+
+async function cacheLookup(url) {
+  if (!cacheReady) return null;
+  if (url.includes("/Build/") || url.startsWith("blob:") || url.startsWith("data:")) return null;
+  const name = baseName(url);
+  if (!name) return null;
+  const cache = await caches.open(CACHE_NAME);
+  return (await cache.match(keyFor(name))) || null;
+}
+
+/* ================= FETCH OVERRIDE ================= */
+window.fetch = async function (resource, options) {
+  try {
+    const url = typeof resource === "string" ? resource : (resource.url || String(resource));
+    const hit = await cacheLookup(url);
+    if (hit) return hit;
+  } catch (e) {}
+  return originalFetch(resource, options);
+};
+
+/* ================= XHR OVERRIDE (Unity/Addressables uses XHR) ================= */
+XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+  this.__hk = { method, url: String(url), rest };
+  return OrigOpen.call(this, method, url, ...rest);
+};
+XMLHttpRequest.prototype.send = function (body) {
+  const xhr = this, info = xhr.__hk;
+  if (!info || !cacheReady || info.rest[0] === false) {
+    return OrigSend.call(xhr, body);
+  }
+  cacheLookup(info.url)
+    .then(resp => resp ? resp.blob() : null)
+    .then(blob => {
+      if (blob) {
+        const u = URL.createObjectURL(blob);
+        OrigOpen.call(xhr, info.method, u, ...info.rest);
+      }
+      OrigSend.call(xhr, body);
+    })
+    .catch(() => OrigSend.call(xhr, body));
+};
+
+/* ================= CACHE CHECK ================= */
+async function isCached() {
+  const cache = await caches.open(CACHE_NAME);
+  return !!(await cache.match(KEY_PREFIX + "CACHE_COMPLETE"));
+}
+
+async function cleanupOldCaches() {
+  const names = await caches.keys();
+  await Promise.all(names.map(n =>
+    (n !== CACHE_NAME && n.includes("hksilksong")) ? caches.delete(n) : null));
+}
+
+/* ================= DOWNLOAD (low-memory, retries) ================= */
+let loadedBytes = 0;
+function showDownload() {
+  loadingText.textContent =
+    `DOWNLOADING ASSETS... (${(loadedBytes / 1048576).toFixed(2)} MB / ${TOTAL_MB} MB)`;
+}
+
+async function downloadPart(url) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    let got = 0;
+    try {
+      const res = await originalFetch(url);
+      if (!res.ok) throw new Error("HTTP " + res.status + " for " + url);
+      const reader = res.body.getReader();
+      const chunks = [];
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        got += value.length;
+        loadedBytes += value.length;
+        showDownload();
+      }
+      return new Blob(chunks);      // no big-buffer copy; browser can back it by disk
+    } catch (e) {
+      loadedBytes -= got;
+      lastErr = e;
+      await new Promise(r => setTimeout(r, 1000 * attempt));
+    }
+  }
+  throw lastErr;
+}
+
+async function downloadAll() {
+  const urls = [];
+  for (let i = 1; i <= PART_COUNT; i++) urls.push("StreamingAssets/aa/WebGL.zip.part" + i);
+  const blobs = new Array(urls.length);
+  let next = 0;
+  async function worker() {
+    while (next < urls.length) {
+      const i = next++;
+      blobs[i] = await downloadPart(urls[i]);
+    }
+  }
+  await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+  return new Blob(blobs);
+}
+
+/* ================= ZIP READER (streams, no 2GB buffer) ================= */
+async function readZipEntries(blob) {
+  const tailSize = Math.min(blob.size, 65557);
+  const tail = new DataView(await blob.slice(blob.size - tailSize).arrayBuffer());
+  let eocd = -1;
+  for (let i = tailSize - 22; i >= 0; i--) {
+    if (tail.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error("ZIP end record not found (download incomplete or corrupted)");
+
+  let count = tail.getUint16(eocd + 10, true);
+  let cdSize = tail.getUint32(eocd + 12, true);
+  let cdOff = tail.getUint32(eocd + 16, true);
+
+  if (count === 0xFFFF || cdSize === 0xFFFFFFFF || cdOff === 0xFFFFFFFF) {
+    const loc = eocd - 20;
+    if (loc < 0 || tail.getUint32(loc, true) !== 0x07064b50) throw new Error("ZIP64 locator missing");
+    const z64Off = Number(tail.getBigUint64(loc + 8, true));
+    const z = new DataView(await blob.slice(z64Off, z64Off + 56).arrayBuffer());
+    count = Number(z.getBigUint64(32, true));
+    cdSize = Number(z.getBigUint64(40, true));
+    cdOff = Number(z.getBigUint64(48, true));
+  }
+
+  const cd = new DataView(await blob.slice(cdOff, cdOff + cdSize).arrayBuffer());
+  const dec = new TextDecoder();
+  const entries = [];
+  let p = 0;
+  while (p + 46 <= cd.byteLength && cd.getUint32(p, true) === 0x02014b50) {
+    const method = cd.getUint16(p + 10, true);
+    let compSize = cd.getUint32(p + 20, true);
+    let size = cd.getUint32(p + 24, true);
+    const nameLen = cd.getUint16(p + 28, true);
+    const extraLen = cd.getUint16(p + 30, true);
+    const commentLen = cd.getUint16(p + 32, true);
+    let localOff = cd.getUint32(p + 42, true);
+    const name = dec.decode(new Uint8Array(cd.buffer, cd.byteOffset + p + 46, nameLen));
+
+    if (size === 0xFFFFFFFF || compSize === 0xFFFFFFFF || localOff === 0xFFFFFFFF) {
+      let e = p + 46 + nameLen;
+      const end = e + extraLen;
+      while (e + 4 <= end) {
+        const id = cd.getUint16(e, true), len = cd.getUint16(e + 2, true);
+        if (id === 1) {
+          let q = e + 4;
+          if (size === 0xFFFFFFFF) { size = Number(cd.getBigUint64(q, true)); q += 8; }
+          if (compSize === 0xFFFFFFFF) { compSize = Number(cd.getBigUint64(q, true)); q += 8; }
+          if (localOff === 0xFFFFFFFF) { localOff = Number(cd.getBigUint64(q, true)); q += 8; }
+        }
+        e += 4 + len;
+      }
+    }
+    entries.push({ name, method, compSize, size, localOff });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return entries;
+}
+
+async function extractEntry(blob, ent) {
+  const lh = new DataView(await blob.slice(ent.localOff, ent.localOff + 30).arrayBuffer());
+  if (lh.getUint32(0, true) !== 0x04034b50) throw new Error("Bad local header for " + ent.name);
+  const start = ent.localOff + 30 + lh.getUint16(26, true) + lh.getUint16(28, true);
+  const raw = blob.slice(start, start + ent.compSize);
+  if (ent.method === 0) return raw;
+  if (ent.method === 8) {
+    const stream = raw.stream().pipeThrough(new DecompressionStream("deflate-raw"));
+    return await new Response(stream).blob();
+  }
+  throw new Error("Unsupported compression method " + ent.method + " for " + ent.name);
+}
+
+/* ================= UNZIP INTO CACHE ================= */
+async function unzipAndStore(zipBlob) {
+  loadingText.textContent = "EXTRACTING ASSETS...";
+  const cache = await caches.open(CACHE_NAME);
+  let failed = 0, processed = 0;
+
+  if (typeof DecompressionStream !== "undefined") {
+    const entries = (await readZipEntries(zipBlob)).filter(e => !e.name.endsWith("/"));
+    for (const ent of entries) {
+      try {
+        const b = await extractEntry(zipBlob, ent);
+        await cache.put(keyFor(baseName(ent.name)), new Response(b));
+      } catch (e) {
+        failed++;
+        console.error("Failed:", ent.name, e);
+      }
+      processed++;
+      loadingText.textContent = `EXTRACTING ASSETS... (${processed}/${entries.length})`;
+    }
+  } else {
+    // Fallback for very old browsers (needs lots of RAM)
+    const zip = await JSZip.loadAsync(zipBlob);
+    const files = Object.values(zip.files).filter(f => !f.dir);
+    for (const f of files) {
+      try {
+        await cache.put(keyFor(baseName(f.name)), new Response(await f.async("blob")));
+      } catch (e) { failed++; console.error("Failed:", f.name, e); }
+      processed++;
+      loadingText.textContent = `EXTRACTING ASSETS... (${processed}/${files.length})`;
+    }
+  }
+
+  if (failed > 0) throw new Error(failed + " files failed to extract. Reload to retry.");
+  await cache.put(KEY_PREFIX + "CACHE_COMPLETE", new Response("ok"));
+}
+
+/* ================= MOUSE -> KEY REMAP =================
+   The game's rebind menu can't bind mouse buttons, so we turn clicks into keys.
+   Left click  -> J,  Right click -> K,  BOTH held together -> L (extra key).
+   In the game's Controls menu, bind J / K / L to whatever actions you want.
+   Change the codes below if you prefer other keys. */
+const MOUSE_KEYS = {
+  left:  { code: "KeyJ", key: "j", keyCode: 74 },
+  right: { code: "KeyK", key: "k", keyCode: 75 },
+  both:  { code: "KeyL", key: "l", keyCode: 76 },
+};
+(function setupMouseRemap() {
+  const down = { left: false, right: false, both: false };
+
+  function sendKey(type, k) {
+    const ev = new KeyboardEvent(type, { code: k.code, key: k.key, bubbles: true, cancelable: true });
+    Object.defineProperty(ev, "keyCode", { get: () => k.keyCode });
+    Object.defineProperty(ev, "which",   { get: () => k.keyCode });
+    (document.querySelector("#unity-canvas") || document).dispatchEvent(ev);
+  }
+  function setState(name, pressed) {
+    if (down[name] === pressed) return;
+    down[name] = pressed;
+    sendKey(pressed ? "keydown" : "keyup", MOUSE_KEYS[name]);
+  }
+  function sync(buttons) {
+    const l = !!(buttons & 1), r = !!(buttons & 2);
+    setState("left", l);
+    setState("right", r);
+    setState("both", l && r);
+  }
+
+  const target = document.querySelector("#unity-canvas");
+  target.addEventListener("mousedown", e => { target.focus(); sync(e.buttons); });
+  window.addEventListener("mouseup", e => sync(e.buttons));
+  window.addEventListener("blur", () => sync(0));
+  target.addEventListener("contextmenu", e => e.preventDefault());
+})();
+
+/* ================= MAIN ================= */
+(async () => {
+  try {
+    await cleanupOldCaches();
+    if (!(await isCached())) {
+      await caches.delete(CACHE_NAME);          // drop any partial cache
+      loadingText.textContent = "DOWNLOADING ASSETS...";
+      const zipBlob = await downloadAll();
+      await unzipAndStore(zipBlob);
+    } else {
+      loadingText.textContent = "LOADING FROM CACHE...";
+    }
+    cacheReady = true;
+
+    /* ================= UNITY START ================= */
+    const canvas = document.querySelector("#unity-canvas");
+    const loadingBar = document.querySelector("#unity-loading-bar");
+    const progressBarFull = document.querySelector("#unity-progress-bar-full");
+    const warningBanner = document.querySelector("#unity-warning");
+
+    function unityShowBanner(msg, type) {
+      function update() {
+        warningBanner.style.display = warningBanner.children.length ? 'block' : 'none';
+      }
+      let div = document.createElement('div');
+      div.innerHTML = msg;
+      warningBanner.appendChild(div);
+      if (type == 'error') {
+        div.style = 'background:red;padding:10px;';
+      } else {
+        if (type == 'warning') div.style = 'background:yellow;padding:10px;';
+        setTimeout(() => { warningBanner.removeChild(div); update(); }, 5000);
+      }
+      update();
+    }
+
+    const buildUrl = "Build";
+    const config = {
+      dataUrl: buildUrl + "/w-pt.data.unityweb",
+      frameworkUrl: buildUrl + "/w-pt.framework.js.unityweb",
+      codeUrl: buildUrl + "/w-pt.wasm.unityweb",
+      streamingAssetsUrl: "StreamingAssets",
+      companyName: "EDUrocks Group, Truffled, GN-Math",
+      productName: "Hollow Knight SilkSong",
+      productVersion: "1.0",
+      showBanner: unityShowBanner,
+    };
+
+    loadingBar.style.display = "block";
+    loadingText.textContent = "STARTING GAME...";
+
+    const script = document.createElement("script");
+    // same ref as <base> so loader and build always match
+    script.src = "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/Build/w-pt.loader.js";
+    script.onerror = () => { loadingText.textContent = "ERROR: could not load Unity loader script"; };
+    script.onload = () => {
+      createUnityInstance(canvas, config, (progress) => {
+        progressBarFull.style.width = (progress * 100) + "%";
+      })
+      .then(() => { loadingBar.remove(); loadingText.remove(); })
+      .catch((e) => {
+        console.error(e);
+        loadingText.textContent = "ERROR: " + (e && e.message ? e.message : e);
+      });
+    };
+    document.body.appendChild(script);
+
+  } catch (err) {
+    console.error(err);
+    loadingText.textContent = "ERROR: " + err.message;
+  }
+})();
+</script>
+  </body>
+</html>
