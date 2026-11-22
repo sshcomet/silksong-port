@@ -7,9 +7,55 @@
     <title>Unity Web Player | Hollow Knight SilkSong</title>
     <link rel="shortcut icon" href="TemplateData/favicon.ico">
     <link rel="stylesheet" href="TemplateData/style.css">
+    <style>
+      html, body { background: #ffffff; }
+      #hk-overlay {
+        position: fixed; inset: 0; z-index: 50;
+        display: flex; align-items: center; justify-content: center;
+        background: #ffffff; color: #111827;
+        font-family: "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        transition: opacity .5s ease;
+      }
+      #hk-overlay.hk-hide { opacity: 0; pointer-events: none; }
+      .hk-card { width: min(460px, 86vw); }
+      .hk-title { font-size: 34px; font-weight: 700; letter-spacing: -.01em; margin: 0 0 6px; color: #111827; }
+      .hk-sub { font-size: 13px; color: #6b7280; margin: 0 0 24px; }
+      .hk-step { font-size: 13px; color: #374151; margin-bottom: 8px; min-height: 18px; }
+      .hk-track { height: 4px; border-radius: 99px; background: #e5e7eb; overflow: hidden; }
+      .hk-fill { height: 100%; width: 0%; background: #111827; transition: width .25s ease; }
+      .hk-row { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; color: #6b7280; }
+      #hk-pct { color: #111827; font-weight: 600; }
+      .hk-note { margin-top: 22px; font-size: 12px; color: #9ca3af; line-height: 1.6; }
+      #hk-status.hk-error { color: #dc2626; font-weight: 600; }
+    
+      .hk-footer {
+        position: absolute; left: 0; right: 0; bottom: 22px; text-align: center;
+      }
+      .hk-footer a {
+        display: inline-flex; align-items: center; gap: 6px;
+        font-size: 13px; font-weight: 600; color: #374151; text-decoration: none;
+      }
+      .hk-footer a:hover { color: #111827; text-decoration: underline; }
+      .hk-footer svg { width: 16px; height: 16px; fill: currentColor; }
+    </style>
   </head>
   <body>
-    <div id="loading-text" style="color: white; font-size: 48px; font-family: cursive; text-align: center; margin-top: 20px;"> LOADING...</div>
+    <div id="hk-overlay">
+      <div class="hk-card">
+        <h1 class="hk-title">Hollow Knight: Silksong</h1>
+        <p class="hk-sub" id="hk-sub">Web edition · 1.94 GB download</p>
+        <div class="hk-step" id="hk-step">Preparing…</div>
+        <div class="hk-track"><div class="hk-fill" id="hk-fill"></div></div>
+        <div class="hk-row"><span id="hk-status">Loading…</span><span id="hk-pct">0%</span></div>
+        <p class="hk-note">The first launch downloads the game and stores it in your browser. Later launches start from the cache.</p>
+      </div>
+      <div class="hk-footer">
+        <a href="https://github.com/sshcomet" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          sshcomet
+        </a>
+      </div>
+    </div>
     <div id="unity-container">
       <canvas id="unity-canvas" width=960 height=600 tabindex="-1"></canvas>
       <div id="unity-loading-bar">
@@ -23,10 +69,19 @@
     <script src="jszip.js"></script>
 
 <script>
-const loadingText = document.querySelector("#loading-text");
+const loadingText = document.querySelector("#hk-status");
+function setProgress(frac, step) {
+  const p = Math.max(0, Math.min(1, frac || 0));
+  document.querySelector("#hk-fill").style.width = (p * 100).toFixed(1) + "%";
+  document.querySelector("#hk-pct").textContent = Math.round(p * 100) + "%";
+  if (step) document.querySelector("#hk-step").textContent = step;
+}
 const CACHE_NAME = "hksilksongcache-v3";           // bumped: forces a clean re-extract
 const KEY_PREFIX = "https://hk-cache.local/";       // stable keys, independent of <base>
 const TOTAL_MB = 1986.64;
+function fmtSize(bytes) {
+  return bytes >= 1073741824 ? (bytes / 1073741824).toFixed(2) + " GB" : (bytes / 1048576).toFixed(0) + " MB";
+}
 const PART_COUNT = 100;
 const CONCURRENCY = 4;
 
@@ -100,8 +155,9 @@ async function cleanupOldCaches() {
 /* ================= DOWNLOAD (low-memory, retries) ================= */
 let loadedBytes = 0;
 function showDownload() {
-  loadingText.textContent =
-    `DOWNLOADING ASSETS... (${(loadedBytes / 1048576).toFixed(2)} MB / ${TOTAL_MB} MB)`;
+  const mb = loadedBytes / 1048576;
+  setProgress(mb / TOTAL_MB, "Step 1 of 3 · Downloading game files");
+  loadingText.textContent = `${fmtSize(loadedBytes)} of ${fmtSize(TOTAL_MB * 1048576)} downloaded`;
 }
 
 async function downloadPart(url) {
@@ -219,7 +275,8 @@ async function extractEntry(blob, ent) {
 
 /* ================= UNZIP INTO CACHE ================= */
 async function unzipAndStore(zipBlob) {
-  loadingText.textContent = "EXTRACTING ASSETS...";
+  setProgress(0, "Step 2 of 3 · Unpacking assets");
+  loadingText.textContent = "Unpacking…";
   const cache = await caches.open(CACHE_NAME);
   let failed = 0, processed = 0;
 
@@ -234,7 +291,8 @@ async function unzipAndStore(zipBlob) {
         console.error("Failed:", ent.name, e);
       }
       processed++;
-      loadingText.textContent = `EXTRACTING ASSETS... (${processed}/${entries.length})`;
+      setProgress(processed / entries.length, "Step 2 of 3 · Unpacking assets");
+      loadingText.textContent = `${processed} / ${entries.length} files`;
     }
   } else {
     // Fallback for very old browsers (needs lots of RAM)
@@ -245,7 +303,8 @@ async function unzipAndStore(zipBlob) {
         await cache.put(keyFor(baseName(f.name)), new Response(await f.async("blob")));
       } catch (e) { failed++; console.error("Failed:", f.name, e); }
       processed++;
-      loadingText.textContent = `EXTRACTING ASSETS... (${processed}/${files.length})`;
+      setProgress(processed / files.length, "Step 2 of 3 · Unpacking assets");
+      loadingText.textContent = `${processed} / ${files.length} files`;
     }
   }
 
@@ -297,11 +356,13 @@ const MOUSE_KEYS = {
     await cleanupOldCaches();
     if (!(await isCached())) {
       await caches.delete(CACHE_NAME);          // drop any partial cache
-      loadingText.textContent = "DOWNLOADING ASSETS...";
+      setProgress(0, "Step 1 of 3 · Downloading game files");
+      loadingText.textContent = "Connecting…";
       const zipBlob = await downloadAll();
       await unzipAndStore(zipBlob);
     } else {
-      loadingText.textContent = "LOADING FROM CACHE...";
+      setProgress(1, "Loading from your browser cache");
+      loadingText.textContent = "Ready";
     }
     cacheReady = true;
 
@@ -333,34 +394,41 @@ const MOUSE_KEYS = {
       frameworkUrl: buildUrl + "/w-pt.framework.js.unityweb",
       codeUrl: buildUrl + "/w-pt.wasm.unityweb",
       streamingAssetsUrl: "StreamingAssets",
-      companyName: "EDUrocks Group, Truffled, GN-Math",
+      companyName: "sshcomet",
       productName: "Hollow Knight SilkSong",
       productVersion: "1.0",
       showBanner: unityShowBanner,
     };
 
-    loadingBar.style.display = "block";
-    loadingText.textContent = "STARTING GAME...";
+    setProgress(0, "Step 3 of 3 · Starting game");
+    loadingText.textContent = "Starting…";
 
     const script = document.createElement("script");
     // same ref as <base> so loader and build always match
     script.src = "https://cdn.jsdelivr.net/gh/web-ports/hollow-knight-silksong@master/Build/w-pt.loader.js";
-    script.onerror = () => { loadingText.textContent = "ERROR: could not load Unity loader script"; };
+    script.onerror = () => { loadingText.classList.add("hk-error"); loadingText.textContent = "Error: could not load Unity loader script"; };
     script.onload = () => {
       createUnityInstance(canvas, config, (progress) => {
-        progressBarFull.style.width = (progress * 100) + "%";
+        setProgress(progress, "Step 3 of 3 · Starting game");
       })
-      .then(() => { loadingBar.remove(); loadingText.remove(); })
+      .then(() => {
+        const ov = document.querySelector("#hk-overlay");
+        ov.classList.add("hk-hide");
+        setTimeout(() => ov.remove(), 700);
+        loadingBar.remove();
+      })
       .catch((e) => {
         console.error(e);
-        loadingText.textContent = "ERROR: " + (e && e.message ? e.message : e);
+        loadingText.classList.add("hk-error");
+        loadingText.textContent = "Error: " + (e && e.message ? e.message : e);
       });
     };
     document.body.appendChild(script);
 
   } catch (err) {
     console.error(err);
-    loadingText.textContent = "ERROR: " + err.message;
+    loadingText.classList.add("hk-error");
+    loadingText.textContent = "Error: " + err.message;
   }
 })();
 </script>
